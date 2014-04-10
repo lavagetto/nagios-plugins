@@ -25,16 +25,16 @@ NAGIOS_STATUSES = {
 class Graphite(object):
 
     def __init__(self, url, targets, _from, _until):
-        self.url = url.rstrip('/')
         self.targets = targets
         self._from = _from
         self._until = _until
-        params = [('target', t) for t in self.targets] +\
-            [('from', self._from)] +\
-            [('until', self._until)] +\
-            [('format', 'json')]
-        self.full_url = self.url + '/render?' +\
-            urllib.urlencode(params)
+        params = [('target', t) for t in self.targets].append(
+            ('from', self._from)).append(
+            ('until', self._until)).append(
+            ('format', 'json'))
+
+        self.full_url = "%s/render?%s" % (url.rstrip('/'), urllib.urlencode(params))
+
 
     def check_datapoints(self, datapoints, check_func, **kwargs):
         """Find alerting datapoints
@@ -56,12 +56,14 @@ class Graphite(object):
             return [x for x in datapoints if isinstance(x, Real) and check_func(x, kwargs['threshold'])]
         elif 'bounds' in kwargs:
             if 'compare' in kwargs:
-              return [datapoints[x] for x in xrange(len(datapoints)) if all([datapoints[x], kwargs['bounds'][x], kwargs['compare'][x]]) and check_func(datapoints[x] / kwargs['bounds'][x], kwargs['beyond']) and check_func(datapoints[x], kwargs['compare'][x])]
+              return [datapoints[x] for x in xrange(len(datapoints)) if all([datapoints[x], kwargs['bounds'][x], kwargs['compare'][x]]) and check_func(datapoints[x], kwargs['bounds'][x] * kwargs['beyond']) and check_func(datapoints[x], kwargs['compare'][x])]
             else:
                 return [datapoints[x] for x in xrange(len(datapoints)) if all([datapoints[x], kwargs['bounds'][x]]) and check_func(datapoints[x], kwargs['bounds'][x])]
 
     def fetch_metrics(self):
         try:
+            #TODO: support HTTPS with client-side certs; support use of proxies
+            #TODO: add support for HTTP auth
             response = urllib2.urlopen(self.full_url)
 
             if response.code != 200:
@@ -132,7 +134,7 @@ if __name__ == '__main__':
                       metavar='SERIES',
                       help='Compare TARGET against SERIES')
     parser.add_option('--from', dest='_from',
-                      help='From timestamp/date')
+                      help='From timestamp/date; if you are working with confindence bands, this must be an integer')
     parser.add_option('--until', dest='_until',
                       default='now',
                       help='Until timestamp/date [%default]')
@@ -143,7 +145,7 @@ if __name__ == '__main__':
     parser.add_option('--beyond', dest='beyond',
                       default=0.7,
                       type='float',
-                      help='Alert if metric is PERCENTAGE beyond comparison value [%default]')
+                      help='Alert if metric is PERCENTAGE above comparison value [%default]')
     parser.add_option('--percentile', dest='percentile',
                       default=0,
                       type='int',
@@ -191,7 +193,12 @@ if __name__ == '__main__':
     if options.confidence_bands:
         targets = [options.target[0], 'holtWintersConfidenceBands(%s)' % options.target[0]]
         check_threshold = None
-        from_slice = int(options._from) * -1
+        if options._from is None:
+            my_from = 1
+        else:
+            my_from = options._from
+
+        from_slice = int(my_from) * -1
         real_from = '-2w'
 
         if options.compare:
@@ -234,8 +241,8 @@ if __name__ == '__main__':
                 kwargs['compare'] = [x[0] for x in metric_data[3].get('datapoints', [])][from_slice:]
 
                 if not graphite.has_numbers(kwargs['compare']):
-                    print 'CRITICAL: No compare target output from Graphite!'
-                    sys.exit(NAGIOS_STATUSES['CRITICAL'])
+                    print 'UNKNOWN: No compare target output from Graphite!'
+                    sys.exit(NAGIOS_STATUSES['UNKNOWN'])
 
             if graphite.has_numbers(actual) and graphite.has_numbers(kwargs['bounds']):
                 points_oob = graphite.check_datapoints(actual, check_func, **kwargs)
@@ -246,7 +253,7 @@ if __name__ == '__main__':
 
             else:
                 print 'CRITICAL: No output from Graphite for target(s): %s' % ', '.join(targets)
-                sys.exit(NAGIOS_STATUSES['CRITICAL'])
+                sys.exit(NAGIOS_STATUSES['UNKNOWN'])
         else:
             for target in metric_data:
                 datapoints = [x[0] for x in target.get('datapoints', []) if isinstance(x[0], Real)]
