@@ -12,10 +12,9 @@ Based on the original plugin from disquis:
 
 import os
 import json
-import urllib3
+import urllib2
 from numbers import Real
 import argparse
-import ssl
 import sys
 from collections import defaultdict
 
@@ -24,6 +23,10 @@ try:
     from urlparse import urlparse
 except ImportError:
     from urllib.parse import urlparse
+try:
+    from urllib.parse import urlencode
+except ImportError:
+    from urllib import urlencode
 
 
 class NagiosException(Exception):
@@ -60,50 +63,43 @@ class GraphiteCheck(object):
         # subclasses should just implement get_all here.
         self.get_all(args)
 
-        # Set up the http connectionpool
-        http_opts = {}
-        if args.timeout:
-            http_opts['timeout'] = args.timeout
-        if parsed_url.scheme == 'https':
-            http_opts['ssl_version'] = ssl.PROTOCOL_TLSv1
-            if args.ssl_certs:
-                # We expect a combined cert
-                http_opts['cert_file'] = args.ssl_certs
-            # TODO: verify SSL by default
+        # Dumb urllib2 basic auth support.
+        if self.credentials:
+            self._create_auth()
 
-        self.http = urllib3.PoolManager(num_pools=10, **http_opts)
+        self.http_timeout = args.timeout
+
+    def _create_auth(self):
+        user, password = self.credentials.split(':', 1)
+        pwd_manager = urllib2.HTTPPasswordMgrWithDefaultRealm()
+        pwd_manager.add_password(None, self.base_url, user, password)
+        handler = urllib2.HTTPBasicAuthHandler(pwd_manager)
+        opener = urllib2.build_opener(handler)
+        urllib2.install_opener(opener)
 
     def get_all(self, args):
         # This should be implemented in subclasses
         raise NotImplementedError
 
     def fetch(self):
-        h = {'user_agent': 'check_graphite/1.0'}
+        h = {'User-Agent': 'check_graphite/1.0'}
 
-        if self.credentials:
-            h['basic_auth'] = self.credentials
+        full_url = "%s/render?%s" % (self.base_url, urlencode(self.params))
 
-        full_url = "%s/render" % self.base_url
         try:
-            response = self.http.request(
-                'GET',
-                full_url,
-                fields=self.params,
-                redirect=True,
-                headers=urllib3.util.make_headers(**h)
-            )
-        except urllib3.exceptions.MaxRetryError:
-            raise NagiosException(
-                'UNKNOWN',
-                'Could not reach the graphite server at %s' %
-                full_url)
-
-        if response.status != 200:
+            req = urllib2.Request(full_url, None, h)
+            response = urllib2.urlopen(req, None, self.http_timeout)
+        except urllib2.HTTPError as e:
             raise NagiosException(
                 'UNKNOWN', 'Got status %d from the graphite server at %s' %
-                (response.status, full_url))
+                (e.code, full_url))
+        except urllib2.URLError as e:
+            raise NagiosException(
+                'UNKNOWN', 'Could not reach the graphite server at %s, reason: %s' %
+                (full_url, e.reason[1]))
 
-        return json.loads(response.data)
+        return json.load(response)
+
 
     @classmethod
     def create_parser(cls, parser):
@@ -350,12 +346,6 @@ def main():
         default=10,
         type=int,
         help='Timeout on the graphite call (defaults to 10)')
-    parser.add_argument(
-        '-S',
-        '--client-ssl-cert',
-        dest='ssl_certs',
-        default=None,
-        help='SSL client certificate to use in connection (filename)')
 
     args = parser.parse_args()
 
